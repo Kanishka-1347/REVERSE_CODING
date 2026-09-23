@@ -991,24 +991,23 @@
                 </div>
 
                 <div class="editor-section">
-                    <div class="editor-label">Your C Solution</div>
+                    <div class="editor-label">Your Solution</div>
                     <div class="code-editor">
                         <div class="editor-toolbar">
                             <select class="language-select" id="languageSelect">
                                 <option value="c">C Language</option>
                                 <option value="cpp">C++ (C11)</option>
+                                <option value="python">Python</option>
+                                <option value="java">Java</option>
+                                <option value="javascript">JavaScript</option>
+                                <option value="v">V</option>
                             </select>
                             <div class="editor-actions">
                                 <button class="editor-button" onclick="runCode()">▶ Run Code</button>
                                 <button class="editor-button danger" onclick="clearCode()">Clear</button>
                             </div>
                         </div>
-                        <textarea class="code-input" id="codeEditor" placeholder="#include <stdio.h>
-
-int main() {
-    // Write your code here
-    return 0;
-}"></textarea>
+                        <textarea class="code-input" id="codeEditor" placeholder="Write your solution here"></textarea>
                     </div>
                 </div>
 
@@ -1057,8 +1056,8 @@ int main() {
     </script>
 
     <script>
-        const API_BASE = '/api';
-        const CHALLENGE_TIME = 30 * 60;
+        const API_BASE = 'https://reverse-coding.onrender.com/api';
+        const CHALLENGE_TIME = 60 * 60;
         let currentUser = null;
         let currentChallengeId = null;
         let timeRemaining = CHALLENGE_TIME;
@@ -1084,7 +1083,7 @@ int main() {
             { id: 15, title: 'Diamond Pattern', description: 'Print diamond pattern', input: '5', output: '    *\\n   ***\\n  *****\\n *******\\n*********', difficulty: 'hard', points: 200, explanation: 'Pyramid with increasing/decreasing rows' }
         ];
 
-        function handleLogin(event) {
+        async function handleLogin(event) {
             event.preventDefault();
             currentUser = {
                 fullName: document.getElementById('fullName').value,
@@ -1094,6 +1093,27 @@ int main() {
                 startTime: new Date(),
                 solvedChallenges: []
             };
+
+            try {
+                const response = await fetch(`${API_BASE}/register`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        fullName: currentUser.fullName,
+                        email: currentUser.email,
+                        rollNo: currentUser.rollNo,
+                        college: currentUser.college
+                    })
+                });
+                const result = await response.json();
+                if (!response.ok && result.error !== 'Email already registered') {
+                    alert(result.error || 'Registration failed');
+                    return;
+                }
+            } catch (error) {
+                alert('Backend not connected. Please try again.');
+                return;
+            }
 
             document.getElementById('loginPage').style.display = 'none';
             document.getElementById('dashboardPage').style.display = 'block';
@@ -1188,6 +1208,8 @@ int main() {
                         userId: currentUser.email,
                         challengeId: currentChallengeId,
                         code,
+                        language: document.getElementById('languageSelect').value,
+                        input: c.input,
                         expectedOutput: c.output
                     })
                 });

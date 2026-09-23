@@ -8,6 +8,7 @@ const cors = require('cors');
 const { Pool } = require('pg');
 const axios = require('axios');
 const { exec } = require('child_process');
+const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
@@ -74,6 +75,40 @@ async function initializeDatabase() {
     }
 }
 
+const languageConfigs = {
+    c: { extension: 'c', compile: ['gcc', (source, executable) => ['-o', executable, source, '-lm']], run: (source, executable) => [executable, []] },
+    cpp: { extension: 'cpp', compile: ['g++', (source, executable) => ['-o', executable, source, '-lm']], run: (source, executable) => [executable, []] },
+    python: { extension: 'py', run: (source) => ['python3', [source]] },
+    java: { extension: 'java', compile: ['javac', (source) => [source]], run: (source, executable, tempDir) => ['java', ['-cp', tempDir, 'Main']] },
+    javascript: { extension: 'js', run: (source) => ['node', [source]] },
+    v: { extension: 'v', run: (source) => ['v', ['run', source]] }
+};
+
+function runProcess(command, args, input = '') {
+    return new Promise((resolve) => {
+        const child = spawn(command, args, { shell: false });
+        let stdout = '';
+        let stderr = '';
+        let timedOut = false;
+        const timer = setTimeout(() => {
+            timedOut = true;
+            child.kill('SIGKILL');
+        }, 5000);
+
+        child.stdout.on('data', (data) => { stdout += data; });
+        child.stderr.on('data', (data) => { stderr += data; });
+        child.on('error', (error) => {
+            clearTimeout(timer);
+            resolve({ code: 1, stdout, stderr: error.message, timedOut });
+        });
+        child.on('close', (code) => {
+            clearTimeout(timer);
+            resolve({ code: code ?? 1, stdout, stderr, timedOut });
+        });
+        child.stdin.end(input);
+    });
+}
+
 // ===== API ENDPOINTS =====
 
 // Register Participant
@@ -108,8 +143,13 @@ app.post('/api/compile', async (req, res) => {
         return res.status(400).json({ error: 'Code and language required' });
     }
 
+    const config = languageConfigs[language];
+    if (!config) {
+        return res.status(400).json({ error: 'Unsupported language' });
+    }
+
     const tempDir = path.join('/tmp', 'compile_' + Date.now());
-    const sourceFile = path.join(tempDir, `program.${language === 'c' ? 'c' : 'cpp'}`);
+    const sourceFile = path.join(tempDir, `program.${config.extension}`);
     const executableFile = path.join(tempDir, 'program');
     const inputFile = path.join(tempDir, 'input.txt');
 
@@ -127,38 +167,29 @@ app.post('/api/compile', async (req, res) => {
             fs.writeFileSync(inputFile, input);
         }
 
-        // Compile
-        return new Promise((resolve) => {
-            const compileCmd = language === 'c'
-                ? `gcc -o ${executableFile} ${sourceFile} -lm`
-                : `g++ -o ${executableFile} ${sourceFile} -lm`;
+        if (language === 'java') {
+            fs.renameSync(sourceFile, path.join(tempDir, 'Main.java'));
+        }
 
-            exec(compileCmd, { timeout: 5000 }, (error, stdout, stderr) => {
-                if (error) {
-                    cleanupTemp(tempDir);
-                    return resolve(res.json({ success: false, error: stderr || error.message }));
-                }
+        const actualSource = language === 'java' ? path.join(tempDir, 'Main.java') : sourceFile;
+        if (config.compile) {
+            const [compiler, getArgs] = config.compile;
+            const compileResult = await runProcess(compiler, getArgs(actualSource, executableFile));
+            if (compileResult.code !== 0) {
+                cleanupTemp(tempDir);
+                return res.json({ success: false, error: compileResult.stderr || 'Compilation failed' });
+            }
+        }
 
-                // Run executable
-                exec(input ? `${executableFile} < ${inputFile}` : executableFile, 
-                    { timeout: 5000 }, (error, stdout, stderr) => {
-                    
-                    cleanupTemp(tempDir);
-                    
-                    if (error && error.code !== 0) {
-                        return resolve(res.json({ 
-                            success: false, 
-                            error: stderr || error.message 
-                        }));
-                    }
+        const [runner, args] = config.run(actualSource, executableFile, tempDir);
+        const runResult = await runProcess(runner, args, input || '');
+        cleanupTemp(tempDir);
 
-                    resolve(res.json({ 
-                        success: true, 
-                        output: stdout 
-                    }));
-                });
-            });
-        });
+        if (runResult.code !== 0) {
+            return res.json({ success: false, error: runResult.stderr || (runResult.timedOut ? 'Execution timed out' : 'Execution failed') });
+        }
+
+        res.json({ success: true, output: runResult.stdout });
 
     } catch (error) {
         cleanupTemp(tempDir);
@@ -168,14 +199,19 @@ app.post('/api/compile', async (req, res) => {
 
 // Submit Solution
 app.post('/api/submit', async (req, res) => {
-    const { userId, challengeId, code, expectedOutput } = req.body;
+    const { userId, challengeId, code, language, input, expectedOutput } = req.body;
     
     if (!userId || !challengeId || !code) {
         return res.status(400).json({ error: 'Missing required fields' });
     }
 
+    const config = languageConfigs[language];
+    if (!config) {
+        return res.status(400).json({ error: 'Unsupported language' });
+    }
+
     const tempDir = path.join('/tmp', 'submit_' + Date.now());
-    const sourceFile = path.join(tempDir, 'solution.c');
+    const sourceFile = path.join(tempDir, `solution.${config.extension}`);
     const executableFile = path.join(tempDir, 'solution');
 
     try {
@@ -187,37 +223,31 @@ app.post('/api/submit', async (req, res) => {
         // Write source code
         fs.writeFileSync(sourceFile, code);
 
-        // Compile
-        return new Promise((resolve) => {
-            exec(`gcc -o ${executableFile} ${sourceFile} -lm`, 
-                { timeout: 5000 }, (error, stdout, stderr) => {
-                
-                if (error) {
-                    cleanupTemp(tempDir);
-                    
-                    // Save failed submission
-                    pool.query(
-                        'INSERT INTO submissions (participant_email, challenge_id, code, language, status, error_message) VALUES ($1, $2, $3, $4, $5, $6)',
-                        [userId, challengeId, code, 'c', 'compilation_error', stderr || error.message]
-                    );
+        if (language === 'java') {
+            fs.renameSync(sourceFile, path.join(tempDir, 'Main.java'));
+        }
 
-                    return resolve(res.json({ 
-                        success: false, 
-                        error: 'Compilation Error',
-                        details: stderr 
-                    }));
-                }
+        const actualSource = language === 'java' ? path.join(tempDir, 'Main.java') : sourceFile;
+        if (config.compile) {
+            const [compiler, getArgs] = config.compile;
+            const compileResult = await runProcess(compiler, getArgs(actualSource, executableFile));
+            if (compileResult.code !== 0) {
+                cleanupTemp(tempDir);
+                await pool.query(
+                    'INSERT INTO submissions (participant_email, challenge_id, code, language, status, error_message) VALUES ($1, $2, $3, $4, $5, $6)',
+                    [userId, challengeId, code, language, 'compilation_error', compileResult.stderr]
+                );
+                return res.json({ success: false, error: 'Compilation Error', details: compileResult.stderr });
+            }
+        }
 
-                // Run executable with simple test input
-                exec(`echo "${expectedOutput}" | ${executableFile}`, 
-                    { timeout: 5000, shell: '/bin/bash' }, 
-                    (error, stdout, stderr) => {
-                    
-                    cleanupTemp(tempDir);
+        const [runner, args] = config.run(actualSource, executableFile, tempDir);
+        const runResult = await runProcess(runner, args, input || '');
+        cleanupTemp(tempDir);
 
-                    const output = stdout.trim();
-                    const expected = expectedOutput.trim();
-                    const isCorrect = output === expected;
+        const output = runResult.stdout.trim();
+        const expected = (expectedOutput || '').trim();
+        const isCorrect = runResult.code === 0 && output === expected;
 
                     // Get challenge points
                     const challengePoints = {
@@ -231,7 +261,7 @@ app.post('/api/submit', async (req, res) => {
                     // Save submission
                     pool.query(
                         'INSERT INTO submissions (participant_email, challenge_id, code, language, status, output, points_earned) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-                        [userId, challengeId, code, 'c', isCorrect ? 'accepted' : 'wrong_answer', output, points]
+                        [userId, challengeId, code, language, isCorrect ? 'accepted' : 'wrong_answer', output, points]
                     );
 
                     // Update leaderboard if correct
@@ -245,15 +275,12 @@ app.post('/api/submit', async (req, res) => {
                         `, [points, userId]);
                     }
 
-                    resolve(res.json({ 
-                        success: isCorrect,
-                        message: isCorrect ? 'Correct!' : 'Wrong Answer',
-                        actualOutput: output,
-                        expectedOutput: expected,
-                        pointsEarned: points
-                    }));
-                });
-            });
+        res.json({
+            success: isCorrect,
+            message: isCorrect ? 'Correct!' : (runResult.stderr || 'Wrong Answer'),
+            actualOutput: output,
+            expectedOutput: expected,
+            pointsEarned: points
         });
 
     } catch (error) {
@@ -343,6 +370,10 @@ app.get('/api/challenge/:id', async (req, res) => {
 });
 
 // Health Check
+app.get('/', (req, res) => {
+    res.json({ status: 'ok', message: 'Reverse Coding API is running' });
+});
+
 app.get('/health', (req, res) => {
     res.json({ status: 'ok', message: 'Reverse Coding Backend Running' });
 });

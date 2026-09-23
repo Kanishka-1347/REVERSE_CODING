@@ -12,20 +12,6 @@
     ],
     "rewrites": [
       {
-        "source": "/api/**",
-        "run": {
-          "serviceId": "reverse-coding-api",
-          "region": "us-central1"
-        }
-      },
-      {
-        "source": "/health",
-        "run": {
-          "serviceId": "reverse-coding-api",
-          "region": "us-central1"
-        }
-      },
-      {
         "source": "**",
         "destination": "/index.html"
       }
