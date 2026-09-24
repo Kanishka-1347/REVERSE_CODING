@@ -918,7 +918,8 @@
                     </div>
 
                     <button type="submit" class="login-button">Start Challenge</button>
-                </form>
+                    <button type="button" class="login-button" onclick="handleGoogleLogin()">Continue with Google</button>
+                </form>see 
             </div>
         </div>
     </div>
@@ -1064,7 +1065,7 @@
     <script type="module">
         import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.2.1/firebase-app.js';
         import { getAnalytics } from 'https://www.gstatic.com/firebasejs/12.2.1/firebase-analytics.js';
-        import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword } from 'https://www.gstatic.com/firebasejs/12.2.1/firebase-auth.js';
+        import { getAuth, GoogleAuthProvider, createUserWithEmailAndPassword, signInWithEmailAndPassword, signInWithPopup, signInWithRedirect } from 'https://www.gstatic.com/firebasejs/12.2.1/firebase-auth.js';
 
         const firebaseConfig = {
             apiKey: 'AIzaSyCQHXFQBgbSETclUeBV-oaD1wRMwXVIDdE',
@@ -1079,7 +1080,7 @@
         const app = initializeApp(firebaseConfig);
         getAnalytics(app);
         window.firebaseAuth = getAuth(app);
-        window.firebaseAuthApi = { createUserWithEmailAndPassword, signInWithEmailAndPassword };
+        window.firebaseAuthApi = { GoogleAuthProvider, createUserWithEmailAndPassword, signInWithEmailAndPassword, signInWithPopup, signInWithRedirect };
     </script>
 
     <script>
@@ -1155,12 +1156,14 @@
                 });
                 const result = await response.json();
                 if (!response.ok && result.error !== 'Email already registered') {
-                    alert(result.error || 'Registration failed');
-                    return;
+                    throw new Error(result.error || 'Registration failed');
+                }
+                if (!response.ok) {
+                    throw new Error('Registration failed');
                 }
             } catch (error) {
-                alert('Backend not connected. Please try again.');
-                return;
+                alert(error.message || 'Backend not connected. Please try again.');
+                    return;
             }
 
             document.getElementById('loginPage').style.display = 'none';
@@ -1176,6 +1179,48 @@
             connectLeaderboardSocket();
             loadAdminDashboard();
             localStorage.setItem('currentUser', JSON.stringify(currentUser));
+        }
+
+        async function handleGoogleLogin() {
+            try {
+                const provider = new window.firebaseAuthApi.GoogleAuthProvider();
+                const credential = await window.firebaseAuthApi.signInWithPopup(window.firebaseAuth, provider);
+                await completeGoogleLogin(credential.user);
+            } catch (error) {
+                if (['auth/popup-blocked', 'auth/popup-closed-by-user', 'auth/cancelled-popup-request'].includes(error.code)) {
+                    await window.firebaseAuthApi.signInWithRedirect(window.firebaseAuth, new window.firebaseAuthApi.GoogleAuthProvider());
+                    return;
+                }
+                alert(error.message || 'Google Sign-In failed. Confirm Google provider is enabled in Firebase.');
+            }
+        }
+
+        async function completeGoogleLogin(user) {
+            authToken = await user.getIdToken();
+            const name = user.displayName || user.email.split('@')[0];
+            const rollNo = prompt('Enter your roll number:');
+            const college = prompt('Enter your college/branch:');
+            if (!rollNo || !college) return;
+            const response = await fetch(`${API_BASE}/register`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
+                body: JSON.stringify({ fullName: name, email: user.email, rollNo, college })
+            });
+            if (!response.ok && response.status !== 400) throw new Error('Registration failed');
+            currentUser = { fullName: name, email: user.email, rollNo, college, startTime: new Date(), solvedChallenges: [] };
+            localStorage.setItem('currentUser', JSON.stringify(currentUser));
+            document.getElementById('loginPage').style.display = 'none';
+            document.getElementById('dashboardPage').style.display = 'block';
+            document.getElementById('displayName').textContent = name;
+            document.getElementById('displayRoll').textContent = rollNo;
+            enterCompetitionFullscreen();
+            renderChallenges();
+            startTimer();
+            attachPageLeaveListener();
+            loadLeaderboard();
+            loadSubmissionHistory();
+            connectLeaderboardSocket();
+            loadAdminDashboard();
         }
 
         function renderChallenges() {
@@ -1549,7 +1594,10 @@
             if (!user) return;
             authToken = await user.getIdToken();
             const saved = localStorage.getItem('currentUser');
-            if (!saved) return;
+            if (!saved) {
+                await completeGoogleLogin(user);
+                return;
+            }
             currentUser = JSON.parse(saved);
             document.getElementById('loginPage').style.display = 'none';
             document.getElementById('dashboardPage').style.display = 'block';
