@@ -1,0 +1,13 @@
+node_modules/
+.env
+.env.*
+!.env.example
+.neon
+.firebase/
+*.json
+!Package.json
+!package-lock.json
+!challenge-tests.json
+!firebase.json
+serviceAccountKey.json
+*firebase-adminsdk*.json

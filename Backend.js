@@ -23,9 +23,17 @@ const server = http.createServer(app);
 const competitionDurationMs = 60 * 60 * 1000;
 const adminEmails = new Set((process.env.ADMIN_EMAILS || '').split(',').map((email) => email.trim().toLowerCase()).filter(Boolean));
 let firebaseAuth = null;
-if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-    admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON)) });
-    firebaseAuth = admin.auth();
+try {
+    if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+        const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+        admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+        firebaseAuth = admin.auth();
+    } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+        admin.initializeApp({ credential: admin.credential.applicationDefault() });
+        firebaseAuth = admin.auth();
+    }
+} catch (error) {
+    console.error('Firebase Admin initialization failed:', error.message);
 }
 const allowedOrigins = new Set([
     'https://reverse-coding-2k26.web.app',
