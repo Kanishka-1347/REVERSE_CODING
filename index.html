@@ -903,6 +903,11 @@
                     </div>
 
                     <div class="form-group">
+                        <label for="password">Password *</label>
+                        <input type="password" id="password" placeholder="At least 6 characters" minlength="6" required>
+                    </div>
+
+                    <div class="form-group">
                         <label for="rollNo">Roll Number *</label>
                         <input type="text" id="rollNo" placeholder="e.g., 20MCA001" required>
                     </div>
@@ -954,6 +959,24 @@
                     <tbody id="leaderboardBody">
                     </tbody>
                 </table>
+            </div>
+            <div class="leaderboard-section" id="submissionHistorySection" style="display: none;">
+                <div class="leaderboard-title">Submission History</div>
+                <div id="submissionHistory">No submissions yet.</div>
+            </div>
+            <div class="leaderboard-section" id="adminPanel" style="display: none;">
+                <div class="leaderboard-title">Admin Challenge Dashboard</div>
+                <form onsubmit="saveAdminChallenge(event)">
+                    <input id="adminChallengeId" type="number" placeholder="Challenge ID" required>
+                    <input id="adminTitle" placeholder="Title" required>
+                    <input id="adminDescription" placeholder="Description" required>
+                    <input id="adminDifficulty" placeholder="Difficulty" required>
+                    <input id="adminPoints" type="number" placeholder="Points" required>
+                    <textarea id="adminTests" placeholder='Tests JSON: [{"input":"1","output":"1"}]' required></textarea>
+                    <textarea id="adminTemplates" placeholder='Templates JSON: {"python":"print()"}'></textarea>
+                    <button type="submit" class="login-button">Save Challenge</button>
+                </form>
+                <div id="adminChallenges"></div>
             </div>
         </div>
     </div>
@@ -1041,6 +1064,7 @@
     <script type="module">
         import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.2.1/firebase-app.js';
         import { getAnalytics } from 'https://www.gstatic.com/firebasejs/12.2.1/firebase-analytics.js';
+        import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword } from 'https://www.gstatic.com/firebasejs/12.2.1/firebase-auth.js';
 
         const firebaseConfig = {
             apiKey: 'AIzaSyCQHXFQBgbSETclUeBV-oaD1wRMwXVIDdE',
@@ -1054,6 +1078,8 @@
 
         const app = initializeApp(firebaseConfig);
         getAnalytics(app);
+        window.firebaseAuth = getAuth(app);
+        window.firebaseAuthApi = { createUserWithEmailAndPassword, signInWithEmailAndPassword };
     </script>
 
     <script>
@@ -1066,6 +1092,7 @@
         let warningCount = 0;
         let solutionSubmitted = false;
         let securityHandling = false;
+        let authToken = '';
 
         const challenges = [
             { id: 1, title: 'Print Pattern - Triangle', description: 'Print a triangle pattern with numbers 1 to n', input: '4', output: '1\\n1 2\\n1 2 3\\n1 2 3 4', difficulty: 'easy', points: 100, explanation: 'For each row i from 1 to n, print numbers 1 to i' },
@@ -1085,6 +1112,15 @@
             { id: 15, title: 'Diamond Pattern', description: 'Print diamond pattern', input: '5', output: '    *\\n   ***\\n  *****\\n *******\\n*********', difficulty: 'hard', points: 200, explanation: 'Pyramid with increasing/decreasing rows' }
         ];
 
+        const languageTemplates = {
+            c: '#include <stdio.h>\n\nint main(void) {\n    // Read input and print the answer\n    return 0;\n}',
+            cpp: '#include <iostream>\nusing namespace std;\n\nint main() {\n    // Read input and print the answer\n    return 0;\n}',
+            python: '# Read input and print the answer\n',
+            java: 'import java.util.*;\n\npublic class Main {\n    public static void main(String[] args) {\n        // Read input and print the answer\n    }\n}',
+            javascript: "const fs = require('fs');\nconst input = fs.readFileSync(0, 'utf8').trim();\n// Print the answer\n",
+            v: 'module main\n\nfn main() {\n    // Read input and print the answer\n}'
+        };
+
         async function handleLogin(event) {
             event.preventDefault();
             currentUser = {
@@ -1098,9 +1134,18 @@
             enterCompetitionFullscreen();
 
             try {
+                const password = document.getElementById('password').value;
+                let credential;
+                try {
+                    credential = await window.firebaseAuthApi.signInWithEmailAndPassword(window.firebaseAuth, currentUser.email, password);
+                } catch (error) {
+                    if (error.code !== 'auth/user-not-found' && error.code !== 'auth/invalid-credential') throw error;
+                    credential = await window.firebaseAuthApi.createUserWithEmailAndPassword(window.firebaseAuth, currentUser.email, password);
+                }
+                authToken = await credential.user.getIdToken();
                 const response = await fetch(`${API_BASE}/register`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
                     body: JSON.stringify({
                         fullName: currentUser.fullName,
                         email: currentUser.email,
@@ -1127,6 +1172,9 @@
             startTimer();
             attachPageLeaveListener();
             loadLeaderboard();
+            loadSubmissionHistory();
+            connectLeaderboardSocket();
+            loadAdminDashboard();
             localStorage.setItem('currentUser', JSON.stringify(currentUser));
         }
 
@@ -1163,8 +1211,16 @@
             document.getElementById('expectedOutput').textContent = c.output;
             document.getElementById('challengeModal').classList.add('active');
             document.getElementById('outputContent').textContent = 'Run your code to see output...';
+            document.getElementById('codeEditor').value = languageTemplates[document.getElementById('languageSelect').value];
             syncTimer();
         }
+
+        document.getElementById('languageSelect').addEventListener('change', (event) => {
+            const editor = document.getElementById('codeEditor');
+            if (!editor.value.trim() || confirm('Replace the editor with the selected language template?')) {
+                editor.value = languageTemplates[event.target.value];
+            }
+        });
 
         function closeChallengeModal() {
             document.getElementById('challengeModal').classList.remove('active');
@@ -1182,7 +1238,7 @@
             try {
                 const response = await fetch(`${API_BASE}/compile`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
                     body: JSON.stringify({
                         code,
                         language: document.getElementById('languageSelect').value,
@@ -1206,7 +1262,7 @@
             try {
                 const response = await fetch(`${API_BASE}/submit`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
                     body: JSON.stringify({
                         userId: currentUser.email,
                         challengeId: currentChallengeId,
@@ -1238,7 +1294,14 @@
         }
 
         function startTimer() {
-            timeRemaining = CHALLENGE_TIME;
+            clearInterval(timerInterval);
+            fetch(`${API_BASE}/session`, { headers: { Authorization: `Bearer ${authToken}` } })
+                .then((response) => response.json())
+                .then((session) => {
+                    timeRemaining = session.remainingSeconds ?? CHALLENGE_TIME;
+                    updateTimerDisplay();
+                })
+                .catch(() => { timeRemaining = CHALLENGE_TIME; });
             timerInterval = setInterval(() => {
                 timeRemaining--;
                 updateTimerDisplay();
@@ -1306,7 +1369,7 @@
             try {
                 await fetch(`${API_BASE}/submit`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
                     body: JSON.stringify({
                         userId: currentUser.email,
                         challengeId: currentChallengeId,
@@ -1352,7 +1415,7 @@
         async function loadLeaderboard() {
             const tbody = document.getElementById('leaderboardBody');
             try {
-                const response = await fetch(`${API_BASE}/leaderboard`);
+                const response = await fetch(`${API_BASE}/leaderboard`, { headers: { Authorization: `Bearer ${authToken}` } });
                 const result = await response.json();
                 if (!response.ok || !result.success) {
                     throw new Error(result.error || 'Unable to load leaderboard');
@@ -1363,7 +1426,19 @@
                     return;
                 }
 
-                tbody.innerHTML = result.leaderboard.map((participant) => `
+                renderLeaderboard(result.leaderboard);
+            } catch (error) {
+                tbody.innerHTML = '<tr><td colspan="4">Leaderboard unavailable.</td></tr>';
+            }
+        }
+
+        function renderLeaderboard(leaderboard) {
+            const tbody = document.getElementById('leaderboardBody');
+            if (!leaderboard.length) {
+                tbody.innerHTML = '<tr><td colspan="4">No participants have joined yet.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = leaderboard.map((participant) => `
                     <tr>
                         <td><div class="rank-badge">#${participant.rank}</div></td>
                         <td>${escapeHtml(participant.name)}</td>
@@ -1371,8 +1446,80 @@
                         <td class="score-badge">${participant.total_points}</td>
                     </tr>
                 `).join('');
+        }
+
+        function connectLeaderboardSocket() {
+            const socketUrl = `${API_BASE.replace('https://', 'wss://').replace('/api', '')}/ws`;
+            const socket = new WebSocket(socketUrl);
+            socket.addEventListener('message', (event) => {
+                const message = JSON.parse(event.data);
+                if (message.type === 'leaderboard') renderLeaderboard(message.leaderboard);
+            });
+        }
+
+        async function loadSubmissionHistory() {
+            const section = document.getElementById('submissionHistorySection');
+            const target = document.getElementById('submissionHistory');
+            try {
+                const response = await fetch(`${API_BASE}/submissions`, { headers: { Authorization: `Bearer ${authToken}` } });
+                const result = await response.json();
+                section.style.display = 'block';
+                target.innerHTML = result.submissions.length ? result.submissions.map((submission) =>
+                    `<details><summary>${escapeHtml(submission.language)} · Q${submission.challenge_id} · ${escapeHtml(submission.status)} · ${submission.points_earned} points</summary><pre>${escapeHtml(submission.output || submission.error_message || '')}</pre></details>`
+                ).join('') : 'No submissions yet.';
             } catch (error) {
-                tbody.innerHTML = '<tr><td colspan="4">Leaderboard unavailable.</td></tr>';
+                section.style.display = 'none';
+            }
+        }
+
+        async function loadAdminDashboard() {
+            try {
+                const response = await fetch(`${API_BASE}/admin/challenges`, { headers: { Authorization: `Bearer ${authToken}` } });
+                if (!response.ok) return;
+                const result = await response.json();
+                document.getElementById('adminPanel').style.display = 'block';
+                document.getElementById('adminChallenges').innerHTML = result.challenges.map((challenge) =>
+                    `<button type="button" onclick='editAdminChallenge(${JSON.stringify(challenge)})'>Edit Q${challenge.id}: ${escapeHtml(challenge.title)}</button>`
+                ).join(' ');
+            } catch (error) {
+                document.getElementById('adminPanel').style.display = 'none';
+            }
+        }
+
+        function editAdminChallenge(challenge) {
+            document.getElementById('adminChallengeId').value = challenge.id;
+            document.getElementById('adminTitle').value = challenge.title;
+            document.getElementById('adminDescription').value = challenge.description;
+            document.getElementById('adminDifficulty').value = challenge.difficulty;
+            document.getElementById('adminPoints').value = challenge.points;
+            document.getElementById('adminTests').value = JSON.stringify(challenge.tests);
+            document.getElementById('adminTemplates').value = JSON.stringify(challenge.templates);
+        }
+
+        async function saveAdminChallenge(event) {
+            event.preventDefault();
+            const challenge = {
+                id: Number(document.getElementById('adminChallengeId').value),
+                title: document.getElementById('adminTitle').value,
+                description: document.getElementById('adminDescription').value,
+                difficulty: document.getElementById('adminDifficulty').value,
+                points: Number(document.getElementById('adminPoints').value),
+                tests: JSON.parse(document.getElementById('adminTests').value),
+                templates: JSON.parse(document.getElementById('adminTemplates').value || '{}')
+            };
+            challenge.input = challenge.tests[0]?.input || '';
+            challenge.output = challenge.tests[0]?.output || '';
+            challenge.explanation = challenge.description;
+            const response = await fetch(`${API_BASE}/admin/challenges`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
+                body: JSON.stringify(challenge)
+            });
+            if (response.ok) {
+                alert('Challenge saved');
+                loadAdminDashboard();
+            } else {
+                alert('Unable to save challenge');
             }
         }
 
@@ -1398,19 +1545,23 @@
             }
         }
 
-        window.addEventListener('load', () => {
+        window.firebaseAuth?.onAuthStateChanged(async (user) => {
+            if (!user) return;
+            authToken = await user.getIdToken();
             const saved = localStorage.getItem('currentUser');
-            if (saved) {
-                currentUser = JSON.parse(saved);
-                document.getElementById('loginPage').style.display = 'none';
-                document.getElementById('dashboardPage').style.display = 'block';
-                document.getElementById('displayName').textContent = currentUser.fullName;
-                document.getElementById('displayRoll').textContent = currentUser.rollNo;
-                renderChallenges();
-                startTimer();
-                attachPageLeaveListener();
-                loadLeaderboard();
-            }
+            if (!saved) return;
+            currentUser = JSON.parse(saved);
+            document.getElementById('loginPage').style.display = 'none';
+            document.getElementById('dashboardPage').style.display = 'block';
+            document.getElementById('displayName').textContent = currentUser.fullName;
+            document.getElementById('displayRoll').textContent = currentUser.rollNo;
+            renderChallenges();
+            startTimer();
+            attachPageLeaveListener();
+            loadLeaderboard();
+            loadSubmissionHistory();
+            connectLeaderboardSocket();
+            loadAdminDashboard();
         });
     </script>
 </body>

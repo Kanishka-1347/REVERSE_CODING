@@ -9,12 +9,24 @@ const { Pool } = require('pg');
 const axios = require('axios');
 const { exec } = require('child_process');
 const { spawn } = require('child_process');
+const http = require('http');
+const { WebSocketServer } = require('ws');
+const rateLimit = require('express-rate-limit');
+const admin = require('firebase-admin');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const server = http.createServer(app);
+const competitionDurationMs = 60 * 60 * 1000;
+const adminEmails = new Set((process.env.ADMIN_EMAILS || '').split(',').map((email) => email.trim().toLowerCase()).filter(Boolean));
+let firebaseAuth = null;
+if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+    admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON)) });
+    firebaseAuth = admin.auth();
+}
 const allowedOrigins = new Set([
     'https://reverse-coding-2k26.web.app',
     'https://reverse-coding-2k26.firebaseapp.com'
@@ -38,6 +50,30 @@ app.use((req, res, next) => {
 });
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb' }));
+const compileLimiter = rateLimit({ windowMs: 60 * 1000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false });
+
+async function requireAuth(req, res, next) {
+    if (!firebaseAuth) {
+        return res.status(503).json({ error: 'Firebase Admin authentication is not configured' });
+    }
+    const header = req.headers.authorization || '';
+    if (!header.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Authentication required' });
+    }
+    try {
+        req.user = await firebaseAuth.verifyIdToken(header.slice(7));
+        next();
+    } catch (error) {
+        res.status(401).json({ error: 'Invalid authentication token' });
+    }
+}
+
+function requireAdmin(req, res, next) {
+    if (!adminEmails.has(String(req.user.email || '').toLowerCase())) {
+        return res.status(403).json({ error: 'Administrator access required' });
+    }
+    next();
+}
 
 // Database Connection
 const pool = new Pool({
@@ -50,6 +86,7 @@ async function initializeDatabase() {
         await pool.query(`
             CREATE TABLE IF NOT EXISTS participants (
                 id SERIAL PRIMARY KEY,
+                firebase_uid VARCHAR(255) UNIQUE,
                 email VARCHAR(255) UNIQUE NOT NULL,
                 name VARCHAR(255) NOT NULL,
                 roll_no VARCHAR(50) NOT NULL,
@@ -59,6 +96,8 @@ async function initializeDatabase() {
                 disqualified BOOLEAN DEFAULT FALSE
             )
         `);
+        await pool.query('ALTER TABLE participants ADD COLUMN IF NOT EXISTS firebase_uid VARCHAR(255) UNIQUE');
+        await pool.query('ALTER TABLE participants ADD COLUMN IF NOT EXISTS timer_deadline TIMESTAMP');
 
         await pool.query(`
             CREATE TABLE IF NOT EXISTS submissions (
@@ -86,6 +125,28 @@ async function initializeDatabase() {
                 FOREIGN KEY (participant_email) REFERENCES participants(email)
             )
         `);
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS challenges (
+                id INT PRIMARY KEY,
+                title VARCHAR(255) NOT NULL,
+                description TEXT NOT NULL,
+                difficulty VARCHAR(20) NOT NULL,
+                points INT NOT NULL,
+                input TEXT NOT NULL,
+                output TEXT NOT NULL,
+                explanation TEXT NOT NULL,
+                templates JSONB NOT NULL DEFAULT '{}'::jsonb,
+                tests JSONB NOT NULL DEFAULT '[]'::jsonb,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        for (const challenge of challengeCatalog) {
+            await pool.query(
+                `INSERT INTO challenges (id, title, description, difficulty, points, input, output, explanation, tests)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (id) DO NOTHING`,
+                [challenge.id, challenge.title, challenge.description, challenge.difficulty, challenge.points, challenge.input, challenge.output, challenge.explanation, challenge.tests]
+            );
+        }
 
         console.log('✓ Database initialized');
     } catch (error) {
@@ -102,6 +163,26 @@ const languageConfigs = {
     v: { extension: 'v', run: (source) => ['v', ['run', source]] }
 };
 const challengeTests = require('./challenge-tests.json');
+const challengeCatalog = [
+    [1, 'Print Pattern - Triangle', 'Print a triangle pattern with numbers 1 to n', 'easy', 100, '4', '1\n1 2\n1 2 3\n1 2 3 4'],
+    [2, 'Factorial', 'Calculate factorial of a number', 'easy', 100, '5', '120'],
+    [3, 'String Reversal', 'Reverse a given string', 'easy', 100, 'CHENNAI', 'IANNEHC'],
+    [4, 'Prime Number Check', 'Check if number is prime', 'easy', 100, '7', 'PRIME'],
+    [5, 'Fibonacci Sequence', 'Print first n Fibonacci numbers', 'medium', 150, '6', '0 1 1 2 3 5'],
+    [6, 'Palindrome Check', 'Check if number is palindrome', 'easy', 100, '121', 'PALINDROME'],
+    [7, 'Sum of Digits', 'Find sum of all digits', 'easy', 100, '1234', '10'],
+    [8, 'Armstrong Number', 'Check if Armstrong number', 'medium', 150, '153', 'ARMSTRONG'],
+    [9, 'Find Mode', 'Find most frequent element', 'medium', 150, '5 2 9 1 5', '5'],
+    [10, 'Word Frequency', 'Count frequency of words', 'medium', 150, 'hi hello hi', 'hi=2 hello=1'],
+    [11, 'Hollow Square', 'Print hollow square pattern', 'medium', 150, '4', '****\n*  *\n*  *\n****'],
+    [12, 'Leap Year', 'Check if year is leap year', 'easy', 100, '2024', 'LEAP YEAR'],
+    [13, 'Anagram Check', 'Check if strings are anagrams', 'medium', 150, 'listen silent', 'ANAGRAM'],
+    [14, 'Remove Duplicates', 'Remove duplicates maintaining order', 'medium', 150, '1 2 2 3 1', '1 2 3'],
+    [15, 'Diamond Pattern', 'Print diamond pattern', 'hard', 200, '5', '    *\n   ***\n  *****\n *******\n*********']
+].map(([id, title, description, difficulty, points, input, output]) => ({
+    id, title, description, difficulty, points, input, output, explanation: description,
+    tests: challengeTests[String(id)]
+}));
 
 function normalizeOutput(value) {
     return String(value).replace(/\r\n/g, '\n').trim();
@@ -135,16 +216,24 @@ function runProcess(command, args, input = '') {
 // ===== API ENDPOINTS =====
 
 // Register Participant
-app.post('/api/register', async (req, res) => {
+app.post('/api/register', requireAuth, async (req, res) => {
     const { fullName, email, rollNo, college } = req.body;
+    if (email.toLowerCase() !== String(req.user.email || '').toLowerCase()) {
+        return res.status(403).json({ error: 'Email does not match authenticated user' });
+    }
     try {
         const result = await pool.query(
-            'INSERT INTO participants (email, name, roll_no, college) VALUES ($1, $2, $3, $4) RETURNING *',
-            [email, fullName, rollNo, college]
+            `INSERT INTO participants (firebase_uid, email, name, roll_no, college, timer_deadline)
+             VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP + INTERVAL '1 hour')
+             ON CONFLICT (email) DO UPDATE SET firebase_uid = EXCLUDED.firebase_uid,
+                     name = EXCLUDED.name, roll_no = EXCLUDED.roll_no, college = EXCLUDED.college,
+                     timer_deadline = COALESCE(participants.timer_deadline, EXCLUDED.timer_deadline)
+             RETURNING *`,
+            [req.user.uid, email, fullName, rollNo, college]
         );
         
         await pool.query(
-            'INSERT INTO leaderboard (participant_email) VALUES ($1)',
+            'INSERT INTO leaderboard (participant_email) VALUES ($1) ON CONFLICT (participant_email) DO NOTHING',
             [email]
         );
 
@@ -159,7 +248,7 @@ app.post('/api/register', async (req, res) => {
 });
 
 // Compile and run code in an isolated temporary process.
-app.post('/api/compile', async (req, res) => {
+app.post('/api/compile', requireAuth, compileLimiter, async (req, res) => {
     const { code, language, input } = req.body;
     
     if (!code || !language) {
@@ -221,8 +310,9 @@ app.post('/api/compile', async (req, res) => {
 });
 
 // Submit Solution
-app.post('/api/submit', async (req, res) => {
-    const { userId, challengeId, code, language } = req.body;
+app.post('/api/submit', requireAuth, compileLimiter, async (req, res) => {
+    const { challengeId, code, language } = req.body;
+    const userId = req.user.email;
     
     if (!userId || !challengeId || !code) {
         return res.status(400).json({ error: 'Missing required fields' });
@@ -233,9 +323,18 @@ app.post('/api/submit', async (req, res) => {
         return res.status(400).json({ error: 'Unsupported language' });
     }
 
-    const tests = challengeTests[String(challengeId)];
+    const challengeRecord = await pool.query('SELECT tests FROM challenges WHERE id = $1', [challengeId]);
+    const tests = challengeRecord.rows[0]?.tests?.length ? challengeRecord.rows[0].tests : challengeTests[String(challengeId)];
     if (!tests) {
         return res.status(400).json({ error: 'Challenge test cases not found' });
+    }
+
+    const participant = await pool.query('SELECT timer_deadline, disqualified FROM participants WHERE email = $1', [userId]);
+    if (!participant.rows[0]) {
+        return res.status(403).json({ error: 'Participant registration required' });
+    }
+    if (participant.rows[0].disqualified || new Date(participant.rows[0].timer_deadline).getTime() <= Date.now()) {
+        return res.status(403).json({ error: 'Competition time has ended or participant is disqualified' });
     }
 
     const tempDir = path.join('/tmp', 'submit_' + Date.now());
@@ -312,6 +411,7 @@ app.post('/api/submit', async (req, res) => {
                                 updated_at = CURRENT_TIMESTAMP
                             WHERE participant_email = $2
                         `, [points, userId]);
+                        broadcastLeaderboardUpdate();
                     }
 
         res.json({
@@ -423,6 +523,24 @@ app.use((err, req, res, next) => {
     res.status(500).json({ error: 'Server error', message: err.message });
 });
 
+const wss = new WebSocketServer({ server, path: '/ws' });
+wss.on('connection', (socket) => {
+    socket.send(JSON.stringify({ type: 'connected' }));
+});
+
+async function broadcastLeaderboardUpdate() {
+    const result = await pool.query(`
+        SELECT p.name, l.challenges_solved, l.total_points,
+               ROW_NUMBER() OVER (ORDER BY l.total_points DESC) as rank
+        FROM leaderboard l JOIN participants p ON l.participant_email = p.email
+        WHERE p.disqualified = FALSE ORDER BY l.total_points DESC LIMIT 50
+    `);
+    const payload = JSON.stringify({ type: 'leaderboard', leaderboard: result.rows });
+    wss.clients.forEach((client) => {
+        if (client.readyState === 1) client.send(payload);
+    });
+}
+
 // Cleanup function
 function cleanupTemp(dir) {
     try {
@@ -439,7 +557,7 @@ async function start() {
     try {
         await initializeDatabase();
         
-        app.listen(PORT, () => {
+        server.listen(PORT, () => {
             console.log(`✓ Server running on http://localhost:${PORT}`);
             console.log('✓ Health check: http://localhost:' + PORT + '/health');
         });
@@ -455,4 +573,50 @@ start();
 process.on('SIGINT', () => {
     pool.end();
     process.exit(0);
+});
+
+app.get('/api/session', requireAuth, async (req, res) => {
+    const result = await pool.query('SELECT timer_deadline, warnings, disqualified FROM participants WHERE firebase_uid = $1', [req.user.uid]);
+    if (!result.rows[0]) return res.status(404).json({ error: 'Participant not registered' });
+    res.json({
+        deadline: result.rows[0].timer_deadline,
+        remainingSeconds: Math.max(0, Math.floor((new Date(result.rows[0].timer_deadline).getTime() - Date.now()) / 1000)),
+        warnings: result.rows[0].warnings,
+        disqualified: result.rows[0].disqualified
+    });
+});
+
+app.get('/api/submissions', requireAuth, async (req, res) => {
+    const result = await pool.query(
+        'SELECT id, challenge_id, language, status, output, error_message, points_earned, submitted_at FROM submissions WHERE participant_email = $1 ORDER BY submitted_at DESC LIMIT 100',
+        [req.user.email]
+    );
+    res.json({ submissions: result.rows });
+});
+
+app.get('/api/admin/challenges', requireAuth, requireAdmin, async (req, res) => {
+    const result = await pool.query('SELECT * FROM challenges ORDER BY id');
+    res.json({ challenges: result.rows });
+});
+
+app.post('/api/admin/challenges', requireAuth, requireAdmin, async (req, res) => {
+    const { id, title, description, difficulty, points, input, output, explanation, templates, tests } = req.body;
+    if (!id || !title || !description || !difficulty || !points || !Array.isArray(tests)) {
+        return res.status(400).json({ error: 'Challenge fields and tests are required' });
+    }
+    const result = await pool.query(
+        `INSERT INTO challenges (id, title, description, difficulty, points, input, output, explanation, templates, tests)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+         ON CONFLICT (id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description,
+         difficulty=EXCLUDED.difficulty, points=EXCLUDED.points, input=EXCLUDED.input, output=EXCLUDED.output,
+         explanation=EXCLUDED.explanation, templates=EXCLUDED.templates, tests=EXCLUDED.tests, updated_at=CURRENT_TIMESTAMP
+         RETURNING *`,
+        [id, title, description, difficulty, points, input || '', output || '', explanation || '', templates || {}, tests]
+    );
+    res.json({ challenge: result.rows[0] });
+});
+
+app.delete('/api/admin/challenges/:id', requireAuth, requireAdmin, async (req, res) => {
+    await pool.query('DELETE FROM challenges WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
 });
