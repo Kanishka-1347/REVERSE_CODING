@@ -1065,6 +1065,7 @@
         let timerInterval = null;
         let warningCount = 0;
         let solutionSubmitted = false;
+        let securityHandling = false;
 
         const challenges = [
             { id: 1, title: 'Print Pattern - Triangle', description: 'Print a triangle pattern with numbers 1 to n', input: '4', output: '1\\n1 2\\n1 2 3\\n1 2 3 4', difficulty: 'easy', points: 100, explanation: 'For each row i from 1 to n, print numbers 1 to i' },
@@ -1094,6 +1095,7 @@
                 startTime: new Date(),
                 solvedChallenges: []
             };
+            enterCompetitionFullscreen();
 
             try {
                 const response = await fetch(`${API_BASE}/register`, {
@@ -1173,10 +1175,10 @@
             const code = document.getElementById('codeEditor').value;
             const output = document.getElementById('outputContent');
             if (!code.trim()) {
-                output.innerHTML = '❌ Error: Code is empty';
+                output.textContent = 'Error: Code is empty';
                 return;
             }
-            output.innerHTML = '⏳ Compiling and running...';
+            output.textContent = 'Compiling and running...';
             try {
                 const response = await fetch(`${API_BASE}/compile`, {
                     method: 'POST',
@@ -1188,9 +1190,9 @@
                     })
                 });
                 const result = await response.json();
-                output.innerHTML = result.success ? `✓ Output:\n${result.output}` : `❌ Error:\n${result.error}`;
+                output.textContent = result.success ? `Output:\n${result.output}` : `Error:\n${result.error}`;
             } catch (error) {
-                output.innerHTML = '❌ Backend not connected. Configure Node.js server for full functionality.';
+                output.textContent = 'Backend not connected.';
             }
         }
 
@@ -1267,39 +1269,70 @@
         }
 
         function attachPageLeaveListener() {
-            window.addEventListener('beforeunload', (e) => {
-                warningCount++;
-                if (warningCount < 3) {
-                    e.preventDefault();
-                    e.returnValue = '';
-                    showWarning(warningCount);
-                } else {
-                    alert('❌ Disqualified!');
-                    handleLogout();
+            document.addEventListener('visibilitychange', handleSecurityViolation);
+            document.addEventListener('fullscreenchange', () => {
+                if (currentUser && !document.fullscreenElement) {
+                    handleSecurityViolation();
                 }
             });
+        }
 
-            document.addEventListener('visibilitychange', () => {
-                if (document.hidden) {
-                    warningCount++;
-                    if (warningCount < 3) {
-                        showWarning(warningCount);
-                    } else {
-                        alert('❌ Disqualified!');
-                        handleLogout();
-                    }
-                }
-            });
+        function enterCompetitionFullscreen() {
+            document.documentElement.requestFullscreen?.().catch(() => {});
+        }
 
-            window.addEventListener('blur', () => {
-                warningCount++;
-                if (warningCount < 3) {
-                    showWarning(warningCount);
-                } else {
-                    alert('❌ Disqualified!');
-                    handleLogout();
-                }
-            });
+        async function handleSecurityViolation() {
+            if (securityHandling || !currentUser || (!document.hidden && document.fullscreenElement)) {
+                return;
+            }
+
+            warningCount++;
+            if (warningCount === 1) {
+                showWarning(1);
+                return;
+            }
+
+            securityHandling = true;
+            await autoSubmitCurrentCode();
+            alert('Second violation detected. Your code was submitted and you have been exited.');
+            forceLogout();
+        }
+
+        async function autoSubmitCurrentCode() {
+            const code = document.getElementById('codeEditor').value;
+            if (!currentChallengeId || !code.trim() || !currentUser) {
+                return;
+            }
+
+            const challenge = challenges.find((item) => item.id === currentChallengeId);
+            try {
+                await fetch(`${API_BASE}/submit`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        userId: currentUser.email,
+                        challengeId: currentChallengeId,
+                        code,
+                        language: document.getElementById('languageSelect').value,
+                        input: challenge.input,
+                        expectedOutput: challenge.output
+                    })
+                });
+            } catch (error) {
+                console.error('Automatic submission failed', error);
+            }
+        }
+
+        function forceLogout() {
+            clearInterval(timerInterval);
+            document.exitFullscreen?.().catch(() => {});
+            localStorage.removeItem('currentUser');
+            document.getElementById('dashboardPage').style.display = 'none';
+            document.getElementById('loginPage').style.display = 'flex';
+            document.querySelector('form').reset();
+            currentUser = null;
+            warningCount = 0;
+            securityHandling = false;
         }
 
         function showWarning(count) {

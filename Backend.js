@@ -15,9 +15,27 @@ require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const allowedOrigins = new Set([
+    'https://reverse-coding-2k26.web.app',
+    'https://reverse-coding-2k26.firebaseapp.com'
+]);
 
 // Middleware
-app.use(cors());
+app.use(cors({
+    origin(origin, callback) {
+        if (!origin || allowedOrigins.has(origin)) {
+            return callback(null, true);
+        }
+        return callback(new Error('Origin not allowed'));
+    }
+}));
+app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    next();
+});
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb' }));
 
@@ -135,7 +153,7 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
-// Compile and Run C Code
+// Compile and run code in an isolated temporary process.
 app.post('/api/compile', async (req, res) => {
     const { code, language, input } = req.body;
     
