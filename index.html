@@ -1157,7 +1157,7 @@
             currentChallengeId = id;
             const c = challenges.find(x => x.id === id);
             document.getElementById('challengeTitle').textContent = `Q${id}: ${c.title}`;
-            document.getElementById('challengeSubtitle').textContent = `${c.difficulty.toUpperCase()} • ${c.points} Points`;
+            document.getElementById('challengeSubtitle').textContent = `${c.difficulty.toUpperCase()} • ${c.points} Points • 2 Test Cases`;
             document.getElementById('problemStatement').textContent = c.explanation;
             document.getElementById('inputFormat').textContent = c.input;
             document.getElementById('expectedOutput').textContent = c.output;
@@ -1211,9 +1211,7 @@
                         userId: currentUser.email,
                         challengeId: currentChallengeId,
                         code,
-                        language: document.getElementById('languageSelect').value,
-                        input: c.input,
-                        expectedOutput: c.output
+                        language: document.getElementById('languageSelect').value
                     })
                 });
                 const result = await response.json();
@@ -1313,9 +1311,7 @@
                         userId: currentUser.email,
                         challengeId: currentChallengeId,
                         code,
-                        language: document.getElementById('languageSelect').value,
-                        input: challenge.input,
-                        expectedOutput: challenge.output
+                        language: document.getElementById('languageSelect').value
                     })
                 });
             } catch (error) {

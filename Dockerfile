@@ -13,6 +13,7 @@ COPY Package.json package.json
 RUN npm install --omit=dev
 
 COPY Backend.js ./
+COPY challenge-tests.json ./
 
 ENV NODE_ENV=production
 EXPOSE 8080

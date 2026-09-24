@@ -101,6 +101,11 @@ const languageConfigs = {
     javascript: { extension: 'js', run: (source) => ['node', [source]] },
     v: { extension: 'v', run: (source) => ['v', ['run', source]] }
 };
+const challengeTests = require('./challenge-tests.json');
+
+function normalizeOutput(value) {
+    return String(value).replace(/\r\n/g, '\n').trim();
+}
 
 function runProcess(command, args, input = '') {
     return new Promise((resolve) => {
@@ -217,7 +222,7 @@ app.post('/api/compile', async (req, res) => {
 
 // Submit Solution
 app.post('/api/submit', async (req, res) => {
-    const { userId, challengeId, code, language, input, expectedOutput } = req.body;
+    const { userId, challengeId, code, language } = req.body;
     
     if (!userId || !challengeId || !code) {
         return res.status(400).json({ error: 'Missing required fields' });
@@ -226,6 +231,11 @@ app.post('/api/submit', async (req, res) => {
     const config = languageConfigs[language];
     if (!config) {
         return res.status(400).json({ error: 'Unsupported language' });
+    }
+
+    const tests = challengeTests[String(challengeId)];
+    if (!tests) {
+        return res.status(400).json({ error: 'Challenge test cases not found' });
     }
 
     const tempDir = path.join('/tmp', 'submit_' + Date.now());
@@ -259,13 +269,24 @@ app.post('/api/submit', async (req, res) => {
             }
         }
 
-        const [runner, args] = config.run(actualSource, executableFile, tempDir);
-        const runResult = await runProcess(runner, args, input || '');
+        const results = [];
+        for (const test of tests) {
+            const [runner, args] = config.run(actualSource, executableFile, tempDir);
+            const runResult = await runProcess(runner, args, test.input);
+            const actual = normalizeOutput(runResult.stdout);
+            const expected = normalizeOutput(test.output);
+            results.push({
+                passed: runResult.code === 0 && actual === expected,
+                actual,
+                expected,
+                error: runResult.stderr || null
+            });
+        }
         cleanupTemp(tempDir);
 
-        const output = runResult.stdout.trim();
-        const expected = (expectedOutput || '').trim();
-        const isCorrect = runResult.code === 0 && output === expected;
+        const isCorrect = results.every((result) => result.passed);
+        const failedTest = results.find((result) => !result.passed);
+        const output = JSON.stringify(results);
 
                     // Get challenge points
                     const challengePoints = {
@@ -295,9 +316,9 @@ app.post('/api/submit', async (req, res) => {
 
         res.json({
             success: isCorrect,
-            message: isCorrect ? 'Correct!' : (runResult.stderr || 'Wrong Answer'),
-            actualOutput: output,
-            expectedOutput: expected,
+            message: isCorrect ? `Correct! Passed ${tests.length}/${tests.length} tests.` : `Wrong Answer. Failed test ${results.indexOf(failedTest) + 1}/${tests.length}.`,
+            actualOutput: failedTest?.actual || '',
+            expectedOutput: failedTest?.expected || '',
             pointsEarned: points
         });
 
