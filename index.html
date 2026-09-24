@@ -1319,21 +1319,41 @@
             document.getElementById('warningModal').classList.remove('active');
         }
 
-        function loadLeaderboard() {
+        async function loadLeaderboard() {
             const tbody = document.getElementById('leaderboardBody');
-            const sample = [
-                { name: 'Participant 1', solved: 10, points: 1650 },
-                { name: 'Participant 2', solved: 9, points: 1500 },
-                { name: 'Participant 3', solved: 8, points: 1350 }
-            ];
-            tbody.innerHTML = sample.map((p, i) => `
-                <tr>
-                    <td><div class="rank-badge">#${i + 1}</div></td>
-                    <td>${p.name}</td>
-                    <td>${p.solved}/15</td>
-                    <td class="score-badge">${p.points}</td>
-                </tr>
-            `).join('');
+            try {
+                const response = await fetch(`${API_BASE}/leaderboard`);
+                const result = await response.json();
+                if (!response.ok || !result.success) {
+                    throw new Error(result.error || 'Unable to load leaderboard');
+                }
+
+                if (!result.leaderboard.length) {
+                    tbody.innerHTML = '<tr><td colspan="4">No participants have joined yet.</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = result.leaderboard.map((participant) => `
+                    <tr>
+                        <td><div class="rank-badge">#${participant.rank}</div></td>
+                        <td>${escapeHtml(participant.name)}</td>
+                        <td>${participant.challenges_solved}/15</td>
+                        <td class="score-badge">${participant.total_points}</td>
+                    </tr>
+                `).join('');
+            } catch (error) {
+                tbody.innerHTML = '<tr><td colspan="4">Leaderboard unavailable.</td></tr>';
+            }
+        }
+
+        function escapeHtml(value) {
+            return String(value).replace(/[&<>'"]/g, (character) => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                "'": '&#39;',
+                '"': '&quot;'
+            }[character]));
         }
 
         function handleLogout() {

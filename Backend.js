@@ -259,14 +259,14 @@ app.post('/api/submit', async (req, res) => {
                     const points = isCorrect ? (challengePoints[challengeId] || 100) : 0;
 
                     // Save submission
-                    pool.query(
+                    await pool.query(
                         'INSERT INTO submissions (participant_email, challenge_id, code, language, status, output, points_earned) VALUES ($1, $2, $3, $4, $5, $6, $7)',
                         [userId, challengeId, code, language, isCorrect ? 'accepted' : 'wrong_answer', output, points]
                     );
 
                     // Update leaderboard if correct
                     if (isCorrect) {
-                        pool.query(`
+                        await pool.query(`
                             UPDATE leaderboard 
                             SET challenges_solved = challenges_solved + 1,
                                 total_points = total_points + $1,
